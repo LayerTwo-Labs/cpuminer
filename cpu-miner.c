@@ -826,11 +826,11 @@ static const char *getwork_req =
 #define GBT_RULES "[\"segwit\"]"
 
 static const char *gbt_req =
-	"{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": "
-	GBT_CAPABILITIES ", \"rules\": " GBT_RULES "}], \"id\":0}\r\n";
+        "{\"jsonrpc\": \"2.0\",\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": "
+        GBT_CAPABILITIES ", \"rules\": " GBT_RULES "}], \"id\":0}\r\n";
 static const char *gbt_lp_req =
-	"{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": "
-	GBT_CAPABILITIES ", \"rules\": " GBT_RULES ", \"longpollid\": \"%s\"}], \"id\":0}\r\n";
+        "{\"jsonrpc\": \"2.0\",\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": "
+        GBT_CAPABILITIES ", \"rules\": " GBT_RULES ", \"longpollid\": \"%s\"}], \"id\":0}\r\n";
 
 static bool get_upstream_work(CURL *curl, struct work *work)
 {
