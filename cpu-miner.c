@@ -585,7 +585,24 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 	merkle_tree = malloc(32 * ((1 + tx_count + 1) & ~1));
 	size_t tx_buf_size = 32 * 1024;
 	tx = malloc(tx_buf_size);
-	sha256d(merkle_tree[0], cbtx, cbtx_size);
+	
+	/* For SegWit, use the provided txid field instead of hashing the full coinbase data */
+	if (segwit) {
+		tmp = json_object_get(val, "coinbasetxn");
+		if (tmp) {
+			const char *cbtx_txid = json_string_value(json_object_get(tmp, "txid"));
+			if (!cbtx_txid || !hex2bin(merkle_tree[0], cbtx_txid, 32)) {
+				applog(LOG_ERR, "JSON invalid coinbase txid");
+				goto out;
+			}
+			memrev(merkle_tree[0], 32);
+		} else {
+			/* Fallback to hashing coinbase data if no txid provided */
+			sha256d(merkle_tree[0], cbtx, cbtx_size);
+		}
+	} else {
+		sha256d(merkle_tree[0], cbtx, cbtx_size);
+	}
 	for (i = 0; i < tx_count; i++) {
 		tmp = json_array_get(txa, i);
 		const char *tx_hex = json_string_value(json_object_get(tmp, "data"));
