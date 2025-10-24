@@ -351,6 +351,7 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 	uint32_t target[8];
 	int cbtx_size;
 	unsigned char *cbtx = NULL;
+	unsigned char cbtxid[32] = {0};
 	unsigned char *tx = NULL;
 	int tx_count, tx_size;
 	unsigned char txc_vi[9];
@@ -445,6 +446,17 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 		if (cbtx_size < 60 || !hex2bin(cbtx, cbtx_hex, cbtx_size)) {
 			applog(LOG_ERR, "JSON invalid coinbasetxn");
 			goto out;
+		}
+		const char *cbtxid_hex = json_string_value(json_object_get(tmp, "txid"));
+		int cbtxid_size = cbtxid_hex ? strlen(cbtxid_hex) / 2 : 0;
+		if (cbtxid_size != 32 || !hex2bin(cbtxid, cbtxid_hex, cbtxid_size)) {
+			applog(LOG_ERR, "JSON invalid coinbasetxn txid");
+			goto out;
+		}
+		for (int i = 0; i < cbtxid_size / 2; i++) {
+			unsigned char temp = cbtxid[i];
+			cbtxid[i] = cbtxid[cbtxid_size - 1 - i];
+			cbtxid[cbtxid_size - 1 - i] = temp;
 		}
 	} else {
 		int64_t cbvalue;
@@ -574,6 +586,9 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 			cbtx_size += n;
 		}
 	}
+	if (memcmp(cbtxid, (unsigned char[32]){0}, 32) == 0) {
+		sha256d(cbtxid, cbtx, cbtx_size);
+	}
 
 	n = varint_encode(txc_vi, 1 + tx_count);
 	work->txs = malloc(2 * (n + cbtx_size + tx_size) + 1);
@@ -585,7 +600,7 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 	merkle_tree = malloc(32 * ((1 + tx_count + 1) & ~1));
 	size_t tx_buf_size = 32 * 1024;
 	tx = malloc(tx_buf_size);
-	sha256d(merkle_tree[0], cbtx, cbtx_size);
+	memcpy(merkle_tree[0], cbtxid, 32);
 	for (i = 0; i < tx_count; i++) {
 		tmp = json_array_get(txa, i);
 		const char *tx_hex = json_string_value(json_object_get(tmp, "data"));
