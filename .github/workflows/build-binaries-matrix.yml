@@ -1,0 +1,182 @@
+name: Build Multi-Platform Binaries (Matrix)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  DOCKERFILE: Dockerfile.crossbuild
+  OUTPUT_DIR: binaries
+
+jobs:
+  # Matrix build for all platforms
+  build-binaries:
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x86_64
+            target: linux-x86_64
+            binary: minerd-linux-x86_64
+            continue-on-error: false
+          - platform: linux
+            arch: i686
+            target: linux-i686
+            binary: minerd-linux-i686
+            continue-on-error: false
+          - platform: windows
+            arch: x86_64
+            target: windows-x86_64
+            binary: minerd-windows-x86_64.exe
+            continue-on-error: false
+          - platform: windows
+            arch: i686
+            target: windows-i686
+            binary: minerd-windows-i686.exe
+            continue-on-error: false
+          - platform: macos
+            arch: x86_64
+            target: macos-x86_64
+            binary: minerd-macos-x86_64
+            continue-on-error: true
+          - platform: macos
+            arch: arm64
+            target: macos-arm64
+            binary: minerd-macos-arm64
+            continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.platform }} ${{ matrix.arch }} binary
+        continue-on-error: ${{ matrix.continue-on-error }}
+        run: |
+          mkdir -p ${OUTPUT_DIR}
+          docker build -f ${DOCKERFILE} --target ${{ matrix.target }} -t cpuminer-${{ matrix.target }} --load .
+          docker create --name cpuminer-${{ matrix.target }} cpuminer-${{ matrix.target }}
+          docker cp cpuminer-${{ matrix.target }}:/build/output/${{ matrix.binary }} ./${OUTPUT_DIR}/ || exit 0
+          docker rm cpuminer-${{ matrix.target }}
+
+      - name: Verify binary exists
+        if: matrix.continue-on-error == false
+        run: |
+          if [ ! -f ./${OUTPUT_DIR}/${{ matrix.binary }} ]; then
+            echo "❌ Binary not found: ${OUTPUT_DIR}/${{ matrix.binary }}"
+            exit 1
+          fi
+          echo "✅ Binary built successfully: ${OUTPUT_DIR}/${{ matrix.binary }}"
+
+      - name: Upload ${{ matrix.platform }} ${{ matrix.arch }} binary
+        if: success() || (matrix.continue-on-error && always())
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: ${OUTPUT_DIR}/${{ matrix.binary }}
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # Collect all binaries and create release
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-binaries
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          cd release-binaries
+          
+          # Find and copy all binaries
+          find . -name "minerd-*" -type f -exec cp {} ../release/ \;
+          
+          # Create checksums
+          cd ../release
+          for file in *; do
+            sha256sum "$file" > "${file}.sha256"
+          done
+          
+          # Create archive with all binaries
+          cd ..
+          tar czf cpuminer-binaries-all.tar.gz -C release .
+          zip -r cpuminer-binaries-all.zip release/
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            cpuminer-binaries-all.tar.gz
+            cpuminer-binaries-all.zip
+            release/*.sha256
+          name: Release v${{ steps.get_version.outputs.version }}
+          body: |
+            ## cpuminer v${{ steps.get_version.outputs.version }}
+            
+            Multi-platform binaries built from commit ${{ github.sha }}.
+            
+            ### Downloads
+            - **All platforms (tar.gz)**: `cpuminer-binaries-all.tar.gz`
+            - **All platforms (zip)**: `cpuminer-binaries-all.zip`
+            
+            ### Individual Binaries
+            - Linux x86_64: `minerd-linux-x86_64`
+            - Linux i686: `minerd-linux-i686`
+            - Windows x86_64: `minerd-windows-x86_64.exe`
+            - Windows i686: `minerd-windows-i686.exe`
+            
+            ### Checksums
+            See individual `.sha256` files for verification.
+            
+            ### Verification
+            ```bash
+            sha256sum -c minerd-*.sha256
+            ```
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Build summary
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: build-binaries
+    if: always()
+    steps:
+      - name: Build Summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All platform builds completed. Check individual build jobs for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download artifacts from the workflow run to get the binaries for each platform." >> $GITHUB_STEP_SUMMARY
+

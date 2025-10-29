@@ -1,0 +1,65 @@
+# Docker Compose file for building cpuminer for multiple platforms
+# Usage: docker-compose -f docker-compose.crossbuild.yml build <target>
+#
+# Available targets:
+#   - linux-x86_64
+#   - linux-i686
+#   - windows-x86_64
+#   - windows-i686
+#   - macos-x86_64 (requires macOS SDK)
+#   - macos-arm64 (requires macOS SDK)
+#
+# Example:
+#   docker-compose -f docker-compose.crossbuild.yml build linux-x86_64
+
+version: '3.8'
+
+services:
+  linux-x86_64:
+    build:
+      context: .
+      dockerfile: Dockerfile.crossbuild
+      target: linux-x86_64
+    volumes:
+      - ./binaries:/build/output
+
+  linux-i686:
+    build:
+      context: .
+      dockerfile: Dockerfile.crossbuild
+      target: linux-i686
+    volumes:
+      - ./binaries:/build/output
+
+  windows-x86_64:
+    build:
+      context: .
+      dockerfile: Dockerfile.crossbuild
+      target: windows-x86_64
+    volumes:
+      - ./binaries:/build/output
+
+  windows-i686:
+    build:
+      context: .
+      dockerfile: Dockerfile.crossbuild
+      target: windows-i686
+    volumes:
+      - ./binaries:/build/output
+
+  macos-x86_64:
+    build:
+      context: .
+      dockerfile: Dockerfile.crossbuild
+      target: macos-x86_64
+    volumes:
+      - ./binaries:/build/output
+
+  macos-arm64:
+    build:
+      context: .
+      dockerfile: Dockerfile.crossbuild
+      target: macos-arm64
+    volumes:
+      - ./binaries:/build/output
+

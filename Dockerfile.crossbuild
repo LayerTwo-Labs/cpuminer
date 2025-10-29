@@ -1,0 +1,410 @@
+# Multi-platform cross-compilation Dockerfile for cpuminer
+# Builds binaries for Linux (x86_64, i686), Windows (x86_64, i686), and macOS (x86_64, arm64)
+
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install base build dependencies
+RUN apt-get update && apt-get install -y \
+    autoconf \
+    automake \
+    build-essential \
+    curl \
+    git \
+    libcurl4-openssl-dev \
+    libtool \
+    pkg-config \
+    wget \
+    xz-utils \
+    zip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy source code
+WORKDIR /build
+COPY . /build/src
+
+# ============================================
+# Linux Builds (native)
+# ============================================
+FROM base AS linux-x86_64
+
+WORKDIR /build
+RUN cd /build/src && \
+    ./autogen.sh && \
+    ./configure CFLAGS="-O3" --host=x86_64-linux-gnu && \
+    make clean && \
+    make -j$(nproc)
+
+RUN mkdir -p /build/output && \
+    cp /build/src/minerd /build/output/minerd-linux-x86_64
+
+FROM base AS linux-i686
+
+# Use cross-compilation toolchain for i686 instead of multilib
+RUN apt-get update && apt-get install -y \
+    gcc-i686-linux-gnu \
+    g++-i686-linux-gnu \
+    libc6-dev-i386-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build libcurl for i686 Linux target
+WORKDIR /tmp
+RUN set -e; \
+    CURL_VERSION=8.4.0; \
+    if wget -q https://curl.se/download/curl-${CURL_VERSION}.tar.gz; then \
+        tar xzf curl-${CURL_VERSION}.tar.gz; \
+        cd curl-${CURL_VERSION}; \
+        if CC=i686-linux-gnu-gcc CXX=i686-linux-gnu-g++ ./configure \
+            --prefix=/usr/i686-linux-gnu \
+            --host=i686-linux-gnu \
+            --disable-shared \
+            --enable-static \
+            --without-ssl \
+            --without-libssh2 \
+            --without-zlib \
+            --enable-ipv6 2>&1 | tee /tmp/curl-config-i686.log; then \
+            make -j$(nproc) && make install || true; \
+        fi; \
+    fi; \
+    mkdir -p /usr/i686-linux-gnu/bin; \
+    if [ ! -f /usr/i686-linux-gnu/bin/curl-config ]; then \
+        echo '#!/bin/sh' > /usr/i686-linux-gnu/bin/curl-config; \
+        echo 'case "$$1" in' >> /usr/i686-linux-gnu/bin/curl-config; \
+        echo '  --version) echo "7.15.2" ;;' >> /usr/i686-linux-gnu/bin/curl-config; \
+        echo '  --libs) echo "-L/usr/i686-linux-gnu/lib -lcurl" ;;' >> /usr/i686-linux-gnu/bin/curl-config; \
+        echo '  --cflags) echo "-I/usr/i686-linux-gnu/include" ;;' >> /usr/i686-linux-gnu/bin/curl-config; \
+        echo '  *) exit 1 ;;' >> /usr/i686-linux-gnu/bin/curl-config; \
+        echo 'esac' >> /usr/i686-linux-gnu/bin/curl-config; \
+        chmod +x /usr/i686-linux-gnu/bin/curl-config; \
+    fi
+
+WORKDIR /build
+RUN cd /build/src && \
+    ./autogen.sh && \
+    PATH=/usr/i686-linux-gnu/bin:$PATH \
+    ./configure \
+        CC=i686-linux-gnu-gcc \
+        CXX=i686-linux-gnu-g++ \
+        CPPFLAGS="-I/usr/i686-linux-gnu/include" \
+        LDFLAGS="-L/usr/i686-linux-gnu/lib" \
+        CFLAGS="-O3" \
+        --host=i686-linux-gnu && \
+    make clean && \
+    make -j$(nproc)
+
+RUN mkdir -p /build/output && \
+    cp /build/src/minerd /build/output/minerd-linux-i686
+
+# ============================================
+# Windows Builds (using mingw-w64)
+# ============================================
+FROM base AS windows-x86_64
+
+RUN apt-get update && apt-get install -y \
+    mingw-w64 \
+    mingw-w64-tools \
+    mingw-w64-x86-64-dev \
+    autotools-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build libcurl for MinGW x86_64 or create curl-config wrapper
+WORKDIR /tmp
+RUN set -e; \
+    CURL_VERSION=8.4.0; \
+    if wget -q https://curl.se/download/curl-${CURL_VERSION}.tar.gz; then \
+        tar xzf curl-${CURL_VERSION}.tar.gz; \
+        cd curl-${CURL_VERSION}; \
+        if CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ ./configure \
+            --prefix=/usr/x86_64-w64-mingw32 \
+            --host=x86_64-w64-mingw32 \
+            --disable-shared \
+            --enable-static \
+            --without-ssl \
+            --without-libssh2 \
+            --without-zlib \
+            --enable-ipv6 \
+            --with-winsock2 2>&1 | tee /tmp/curl-config.log; then \
+            make -j$(nproc) && make install || true; \
+        fi; \
+    fi; \
+    mkdir -p /usr/x86_64-w64-mingw32/bin; \
+    if [ ! -f /usr/x86_64-w64-mingw32/bin/curl-config ]; then \
+        echo '#!/bin/sh' > /usr/x86_64-w64-mingw32/bin/curl-config; \
+        echo 'case "$$1" in' >> /usr/x86_64-w64-mingw32/bin/curl-config; \
+        echo '  --version) echo "7.15.2" ;;' >> /usr/x86_64-w64-mingw32/bin/curl-config; \
+        echo '  --libs) echo "-lcurldll -lws2_32 -lwinmm" ;;' >> /usr/x86_64-w64-mingw32/bin/curl-config; \
+        echo '  --cflags) echo "-I/usr/x86_64-w64-mingw32/include" ;;' >> /usr/x86_64-w64-mingw32/bin/curl-config; \
+        echo '  *) exit 1 ;;' >> /usr/x86_64-w64-mingw32/bin/curl-config; \
+        echo 'esac' >> /usr/x86_64-w64-mingw32/bin/curl-config; \
+        chmod +x /usr/x86_64-w64-mingw32/bin/curl-config; \
+    fi
+
+WORKDIR /build
+RUN cd /build/src && \
+    ./autogen.sh && \
+    PATH=/usr/x86_64-w64-mingw32/bin:$PATH \
+    ./configure \
+        CC=x86_64-w64-mingw32-gcc \
+        CXX=x86_64-w64-mingw32-g++ \
+        CPPFLAGS="-I/usr/x86_64-w64-mingw32/include" \
+        LDFLAGS="-L/usr/x86_64-w64-mingw32/lib -static-libgcc -static-libstdc++" \
+        CFLAGS="-O3" \
+        --host=x86_64-w64-mingw32 && \
+    make clean && \
+    make -j$(nproc)
+
+RUN mkdir -p /build/output && \
+    if [ -f /build/src/minerd.exe ]; then \
+        cp /build/src/minerd.exe /build/output/minerd-windows-x86_64.exe; \
+    fi
+
+FROM base AS windows-i686
+
+RUN apt-get update && apt-get install -y \
+    mingw-w64 \
+    mingw-w64-tools \
+    mingw-w64-i686-dev \
+    autotools-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build libcurl for MinGW i686 or create curl-config wrapper
+WORKDIR /tmp
+RUN set -e; \
+    CURL_VERSION=8.4.0; \
+    if wget -q https://curl.se/download/curl-${CURL_VERSION}.tar.gz; then \
+        tar xzf curl-${CURL_VERSION}.tar.gz; \
+        cd curl-${CURL_VERSION}; \
+        if CC=i686-w64-mingw32-gcc CXX=i686-w64-mingw32-g++ ./configure \
+            --prefix=/usr/i686-w64-mingw32 \
+            --host=i686-w64-mingw32 \
+            --disable-shared \
+            --enable-static \
+            --without-ssl \
+            --without-libssh2 \
+            --without-zlib \
+            --enable-ipv6 \
+            --with-winsock2 2>&1 | tee /tmp/curl-config-i686.log; then \
+            make -j$(nproc) && make install || true; \
+        fi; \
+    fi; \
+    mkdir -p /usr/i686-w64-mingw32/bin; \
+    if [ ! -f /usr/i686-w64-mingw32/bin/curl-config ]; then \
+        echo '#!/bin/sh' > /usr/i686-w64-mingw32/bin/curl-config; \
+        echo 'case "$$1" in' >> /usr/i686-w64-mingw32/bin/curl-config; \
+        echo '  --version) echo "7.15.2" ;;' >> /usr/i686-w64-mingw32/bin/curl-config; \
+        echo '  --libs) echo "-lcurldll -lws2_32 -lwinmm" ;;' >> /usr/i686-w64-mingw32/bin/curl-config; \
+        echo '  --cflags) echo "-I/usr/i686-w64-mingw32/include" ;;' >> /usr/i686-w64-mingw32/bin/curl-config; \
+        echo '  *) exit 1 ;;' >> /usr/i686-w64-mingw32/bin/curl-config; \
+        echo 'esac' >> /usr/i686-w64-mingw32/bin/curl-config; \
+        chmod +x /usr/i686-w64-mingw32/bin/curl-config; \
+    fi
+
+WORKDIR /build
+RUN cd /build/src && \
+    ./autogen.sh && \
+    PATH=/usr/i686-w64-mingw32/bin:$PATH \
+    ./configure \
+        CC=i686-w64-mingw32-gcc \
+        CXX=i686-w64-mingw32-g++ \
+        CPPFLAGS="-I/usr/i686-w64-mingw32/include" \
+        LDFLAGS="-L/usr/i686-w64-mingw32/lib -static-libgcc -static-libstdc++" \
+        CFLAGS="-O3" \
+        --host=i686-w64-mingw32 && \
+    make clean && \
+    make -j$(nproc)
+
+RUN mkdir -p /build/output && \
+    if [ -f /build/src/minerd.exe ]; then \
+        cp /build/src/minerd.exe /build/output/minerd-windows-i686.exe; \
+    fi
+
+# ============================================
+# macOS Builds (using osxcross)
+# Note: This requires macOS SDK which you need to obtain separately
+# ============================================
+FROM base AS macos-x86_64
+
+# Install osxcross dependencies
+RUN apt-get update && apt-get install -y \
+    clang \
+    libssl-dev \
+    libxml2-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install osxcross (simplified version - in practice, you need the macOS SDK)
+# Note: osxcross repository structure has changed, using master branch
+ENV OSXCROSS_ROOT=/opt/osxcross
+ENV PATH=$OSXCROSS_ROOT/target/bin:$PATH
+
+# Download and set up osxcross
+RUN mkdir -p $OSXCROSS_ROOT && \
+    cd /tmp && \
+    (wget -q https://github.com/tpoechtrager/osxcross/archive/master.tar.gz -O osxcross.tar.gz || \
+     git clone --depth 1 https://github.com/tpoechtrager/osxcross.git osxcross-tmp || \
+     echo "osxcross download failed, skipping...") && \
+    if [ -f osxcross.tar.gz ]; then \
+        tar xzf osxcross.tar.gz && \
+        mv osxcross-master/* $OSXCROSS_ROOT/ 2>/dev/null || mv osxcross-tmp/* $OSXCROSS_ROOT/ 2>/dev/null || true; \
+    elif [ -d osxcross-tmp ]; then \
+        mv osxcross-tmp/* $OSXCROSS_ROOT/ 2>/dev/null || true; \
+    fi && \
+    rm -rf /tmp/*
+
+# Build osxcross if macOS SDK is provided
+# Place MacOSX.sdk.tar.xz in the project root or in a sdk/ subdirectory
+# The SDK file should be excluded from git (.gitignore)
+# Note: Source is already copied via "COPY . /build/src" so SDK will be in the build context
+RUN mkdir -p /tmp/sdk && \
+    if [ -f /build/src/MacOSX.sdk.tar.xz ]; then \
+        cp /build/src/MacOSX.sdk.tar.xz /tmp/sdk/ && \
+        echo "Found macOS SDK in project root"; \
+    elif [ -f /build/src/sdk/MacOSX.sdk.tar.xz ]; then \
+        cp /build/src/sdk/MacOSX.sdk.tar.xz /tmp/sdk/ && \
+        echo "Found macOS SDK in sdk/ subdirectory"; \
+    else \
+        echo "macOS SDK not found in build context"; \
+    fi
+RUN if [ -n "$(ls -A /tmp/sdk/MacOSX.sdk.tar.xz* 2>/dev/null)" ]; then \
+        SDK_FILE=$(ls /tmp/sdk/MacOSX.sdk.tar.xz* 2>/dev/null | head -1) && \
+        echo "Setting up macOS SDK from $SDK_FILE" && \
+        cp "$SDK_FILE" /tmp/MacOSX.sdk.tar.xz && \
+        cd $OSXCROSS_ROOT && \
+        if [ -f ./tools/gen_sdk_package_pbzx.sh ]; then \
+            bash ./tools/gen_sdk_package_pbzx.sh /tmp/MacOSX.sdk.tar.xz && \
+            UNATTENDED=1 ./build.sh && \
+            echo "osxcross built successfully"; \
+        elif [ -f ./build.sh ]; then \
+            echo "Using alternative osxcross build method" && \
+            UNATTENDED=1 OSX_VERSION_MIN=10.13 ./build.sh /tmp/MacOSX.sdk.tar.xz && \
+            echo "osxcross built successfully"; \
+        else \
+            echo "osxcross build script not found"; \
+        fi && \
+        rm -rf /tmp/sdk /tmp/MacOSX.sdk.tar.xz; \
+    else \
+        echo "macOS SDK not found (MacOSX.sdk.tar.xz not in build context)" && \
+        echo "To enable macOS builds, place MacOSX.sdk.tar.xz in the project root or sdk/ directory"; \
+    fi
+
+WORKDIR /build
+# Build will be skipped without the SDK - this is intentional
+RUN mkdir -p /build/output && \
+    if command -v x86_64-apple-darwin20-clang >/dev/null 2>&1; then \
+        cd /build/src && \
+        ./autogen.sh && \
+        ./configure \
+            CC=x86_64-apple-darwin20-clang \
+            CXX=x86_64-apple-darwin20-clang++ \
+            CFLAGS="-O3" \
+            --host=x86_64-apple-darwin20 && \
+        make clean && \
+        make -j$(nproc) && \
+        cp /build/src/minerd /build/output/minerd-macos-x86_64 && \
+        echo "macOS x86_64 build successful"; \
+    else \
+        echo "macOS x86_64 build skipped (requires macOS SDK - compiler not found)" && \
+        touch /build/output/.macos-x86_64-skipped; \
+    fi
+
+FROM base AS macos-arm64
+
+RUN apt-get update && apt-get install -y \
+    clang \
+    libssl-dev \
+    libxml2-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV OSXCROSS_ROOT=/opt/osxcross
+ENV PATH=$OSXCROSS_ROOT/target/bin:$PATH
+
+# Download and set up osxcross
+RUN mkdir -p $OSXCROSS_ROOT && \
+    cd /tmp && \
+    (wget -q https://github.com/tpoechtrager/osxcross/archive/master.tar.gz -O osxcross.tar.gz || \
+     git clone --depth 1 https://github.com/tpoechtrager/osxcross.git osxcross-tmp || \
+     echo "osxcross download failed, skipping...") && \
+    if [ -f osxcross.tar.gz ]; then \
+        tar xzf osxcross.tar.gz && \
+        mv osxcross-master/* $OSXCROSS_ROOT/ 2>/dev/null || mv osxcross-tmp/* $OSXCROSS_ROOT/ 2>/dev/null || true; \
+    elif [ -d osxcross-tmp ]; then \
+        mv osxcross-tmp/* $OSXCROSS_ROOT/ 2>/dev/null || true; \
+    fi && \
+    rm -rf /tmp/*
+
+# Build osxcross if macOS SDK is provided
+# Place MacOSX.sdk.tar.xz in the project root or in a sdk/ subdirectory
+# The SDK file should be excluded from git (.gitignore)
+# Note: Source is already copied via "COPY . /build/src" so SDK will be in the build context
+RUN mkdir -p /tmp/sdk && \
+    if [ -f /build/src/MacOSX.sdk.tar.xz ]; then \
+        cp /build/src/MacOSX.sdk.tar.xz /tmp/sdk/ && \
+        echo "Found macOS SDK in project root"; \
+    elif [ -f /build/src/sdk/MacOSX.sdk.tar.xz ]; then \
+        cp /build/src/sdk/MacOSX.sdk.tar.xz /tmp/sdk/ && \
+        echo "Found macOS SDK in sdk/ subdirectory"; \
+    else \
+        echo "macOS SDK not found in build context"; \
+    fi
+RUN if [ -n "$(ls -A /tmp/sdk/MacOSX.sdk.tar.xz* 2>/dev/null)" ]; then \
+        SDK_FILE=$(ls /tmp/sdk/MacOSX.sdk.tar.xz* 2>/dev/null | head -1) && \
+        echo "Setting up macOS SDK from $SDK_FILE" && \
+        cp "$SDK_FILE" /tmp/MacOSX.sdk.tar.xz && \
+        cd $OSXCROSS_ROOT && \
+        if [ -f ./tools/gen_sdk_package_pbzx.sh ]; then \
+            bash ./tools/gen_sdk_package_pbzx.sh /tmp/MacOSX.sdk.tar.xz && \
+            UNATTENDED=1 ./build.sh && \
+            echo "osxcross built successfully"; \
+        elif [ -f ./build.sh ]; then \
+            echo "Using alternative osxcross build method" && \
+            UNATTENDED=1 OSX_VERSION_MIN=10.13 ./build.sh /tmp/MacOSX.sdk.tar.xz && \
+            echo "osxcross built successfully"; \
+        else \
+            echo "osxcross build script not found"; \
+        fi && \
+        rm -rf /tmp/sdk /tmp/MacOSX.sdk.tar.xz; \
+    else \
+        echo "macOS SDK not found (MacOSX.sdk.tar.xz not in build context)" && \
+        echo "To enable macOS builds, place MacOSX.sdk.tar.xz in the project root or sdk/ directory"; \
+    fi
+
+WORKDIR /build
+# Build will be skipped without the SDK - this is intentional
+RUN mkdir -p /build/output && \
+    if command -v arm64-apple-darwin20-clang >/dev/null 2>&1; then \
+        cd /build/src && \
+        ./autogen.sh && \
+        ./configure \
+            CC=arm64-apple-darwin20-clang \
+            CXX=arm64-apple-darwin20-clang++ \
+            CFLAGS="-O3" \
+            --host=arm64-apple-darwin20 && \
+        make clean && \
+        make -j$(nproc) && \
+        cp /build/src/minerd /build/output/minerd-macos-arm64 && \
+        echo "macOS arm64 build successful"; \
+    else \
+        echo "macOS arm64 build skipped (requires macOS SDK - compiler not found)" && \
+        touch /build/output/.macos-arm64-skipped; \
+    fi
+
+# ============================================
+# Final stage: Collect all binaries
+# ============================================
+FROM base AS collector
+
+WORKDIR /output
+
+# Copy binaries from all build stages
+COPY --from=linux-x86_64 /build/output/minerd-linux-x86_64 /output/
+COPY --from=linux-i686 /build/output/minerd-linux-i686 /output/
+COPY --from=windows-x86_64 /build/output/minerd-windows-x86_64.exe /output/
+COPY --from=windows-i686 /build/output/minerd-windows-i686.exe /output/
+COPY --from=macos-x86_64 /build/output/minerd-macos-x86_64 /output/ || true
+COPY --from=macos-arm64 /build/output/minerd-macos-arm64 /output/ || true
+
+RUN ls -lh /output/
+

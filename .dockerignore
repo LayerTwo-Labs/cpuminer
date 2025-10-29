@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.exe
+minerd
+autom4te.cache/
+*.cache
+
+# Docker
+Dockerfile
+Dockerfile.crossbuild
+.dockerignore
+docker-compose*.yml
+
+# Documentation
+*.md
+README-CROSSBUILD.md
+
+# Binaries output
+binaries/
+
+# Config files
+*.json
+example-cfg.json
+
+# Temporary files
+*~
+*.swp
+*.swo
+.DS_Store
+confdefs.h
+conftest.*
+stamp-*
+
+# Source control backups
+configure~
+configure.ac~
+

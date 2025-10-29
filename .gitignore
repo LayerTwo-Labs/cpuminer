@@ -26,3 +26,10 @@ config.sub
 
 mingw32-config.cache
 
+# Cross-compilation binaries output
+binaries/
+
+# macOS SDK (large binary, should not be committed)
+MacOSX.sdk.tar.xz
+sdk/MacOSX.sdk.tar.xz
+

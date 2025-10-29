@@ -1,0 +1,39 @@
+name: Build on Pull Request
+
+on:
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  DOCKERFILE: Dockerfile.crossbuild
+
+jobs:
+  # Quick build test for PRs - only Linux x86_64 for speed
+  quick-build-test:
+    name: Quick Build Test (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Linux x86_64 binary
+        run: |
+          docker build -f ${DOCKERFILE} --target linux-x86_64 -t cpuminer-linux-x86_64 --load .
+          docker create --name cpuminer-linux-x86_64 cpuminer-linux-x86_64
+          docker cp cpuminer-linux-x86_64:/build/output/minerd-linux-x86_64 ./binaries/ || true
+          docker rm cpuminer-linux-x86_64
+
+      - name: Verify binary
+        run: |
+          if [ -f ./binaries/minerd-linux-x86_64 ]; then
+            file ./binaries/minerd-linux-x86_64
+            ./binaries/minerd-linux-x86_64 --help || true
+            echo "✅ Build successful!"
+          else
+            echo "❌ Build failed - binary not found"
+            exit 1
+          fi
+
