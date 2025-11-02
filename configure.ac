@@ -127,7 +127,9 @@ if test "$CURL_CONFIG" = "no"; then
 fi
 
 LIBCURL_CPPFLAGS=`$CURL_CONFIG --cflags`
-LIBCURL=`$CURL_CONFIG --libs`
+if test -z "$LIBCURL"; then
+  LIBCURL=`$CURL_CONFIG --libs`
+fi
 
 dnl Check libcurl version
 LIBCURL_VERSION=`$CURL_CONFIG --version | sed 's/libcurl *//'`
