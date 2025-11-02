@@ -1,0 +1,247 @@
+name: Build, release and upload to releases.drivechain.info
+
+on:
+  pull_request:
+  push: 
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-release:
+    # No windows build for now. Built-in Windows anti virus really
+    # doesn't like the binary!
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: x86_64-unknown-linux-gnu
+
+          - os: macos-latest-large
+            name: x86_64-apple-darwin
+
+    name: Build and release (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Build static OpenSSL 
+        run: |
+          # Download and build OpenSSL statically
+          OPENSSL_VERSION="3.3.3"
+          curl -L https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz -o openssl.tar.gz
+          tar xzf openssl.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+          
+          if [ "${{ matrix.os }}" = "macos-latest-large" ]; then
+            brew install automake
+            ./Configure darwin64-x86_64-cc \
+              --prefix=$HOME/openssl-static \
+              --openssldir=$HOME/openssl-static/ssl \
+              no-shared \
+              no-zlib \
+              no-weak-ssl-ciphers
+          else
+            # Linux
+            sudo apt-get update
+            sudo apt-get install -y zlib1g-dev
+            ./Configure linux-x86_64 \
+              --prefix=$HOME/openssl-static \
+              --openssldir=$HOME/openssl-static/ssl \
+              no-shared \
+              no-zlib \
+              no-weak-ssl-ciphers
+          fi
+          
+          make -j
+          make install_sw
+          cd ..
+
+      - name: Build static curl 
+        run: |
+          # Download and build curl statically for portability
+          curl -L https://curl.se/download/curl-8.11.0.tar.gz -o curl.tar.gz
+          tar xzf curl.tar.gz
+          cd curl-8.11.0
+          
+          # Common configure flags - minimal build with just what we need
+          CURL_CONFIG_FLAGS="--disable-shared --enable-static"
+          CURL_CONFIG_FLAGS="$CURL_CONFIG_FLAGS --prefix=$HOME/curl-static"
+          CURL_CONFIG_FLAGS="$CURL_CONFIG_FLAGS --disable-ldap --disable-ldaps"
+          CURL_CONFIG_FLAGS="$CURL_CONFIG_FLAGS --without-librtmp"
+          CURL_CONFIG_FLAGS="$CURL_CONFIG_FLAGS --without-libpsl --without-brotli --without-zstd"
+          CURL_CONFIG_FLAGS="$CURL_CONFIG_FLAGS --without-libidn2 --without-nghttp2 --without-nghttp3"
+          
+          # Use our statically built OpenSSL
+          CURL_CONFIG_FLAGS="$CURL_CONFIG_FLAGS --with-openssl=$HOME/openssl-static"
+          # Force static linking of OpenSSL
+          export LDFLAGS="-L$HOME/openssl-static/lib"
+          export CPPFLAGS="-I$HOME/openssl-static/include"
+          export PKG_CONFIG_PATH="$HOME/openssl-static/lib/pkgconfig"
+          
+          ./configure $CURL_CONFIG_FLAGS
+          
+          make -j
+          make install
+          
+          # Verify curl was built without rtmp
+          if $HOME/curl-static/bin/curl-config --static-libs | grep -q rtmp; then
+            echo "ERROR: curl-config includes rtmp in static libs!"
+            exit 1
+          fi
+          
+          # Verify curl links OpenSSL statically (no dylib references for macOS)
+          if [ "${{ matrix.os }}" = "macos-latest-large" ]; then
+            if otool -L $HOME/curl-static/lib/libcurl.a 2>/dev/null | grep -q "libssl\|libcrypto"; then
+              echo "WARNING: curl static library may have dynamic OpenSSL dependencies"
+            fi
+          fi
+          
+          cd ..
+
+      - name: Build
+        run: |
+          ./autogen.sh
+          
+          # Set common flags
+          export CFLAGS="-O3"
+          CONFIGURE_OPTS=""
+          
+          # Use our statically built curl and OpenSSL
+          export PKG_CONFIG_PATH="$HOME/curl-static/lib/pkgconfig:$HOME/openssl-static/lib/pkgconfig"
+          export CURL_CONFIG="$HOME/curl-static/bin/curl-config"
+            
+          # Get static libs from curl-config (should not include rtmp since we built without it)
+          export LIBCURL="$($CURL_CONFIG --static-libs)"
+          export LIBCURL_CPPFLAGS="$($CURL_CONFIG --cflags)"
+            
+          # macOS doesn't support -static flag (Linux-only)
+          if [ "${{ matrix.os }}" = "macos-latest-large" ]; then
+            # macOS needs CoreFoundation frameworks for curl's macOS-specific features
+            # Link OpenSSL statically by using full paths to .a files
+            export LDFLAGS="-L$HOME/curl-static/lib -L$HOME/openssl-static/lib -framework CoreFoundation -framework CoreServices -framework SystemConfiguration"
+            # Override any dynamic OpenSSL libs from curl-config with static ones
+            OPENSSL_LIB_DIR="$HOME/openssl-static/lib"
+            export LIBCURL="$(echo $LIBCURL | sed "s|-lssl|-L${OPENSSL_LIB_DIR} ${OPENSSL_LIB_DIR}/libssl.a|g" | sed "s|-lcrypto|-L${OPENSSL_LIB_DIR} ${OPENSSL_LIB_DIR}/libcrypto.a|g")"
+            CONFIGURE_OPTS="--disable-assembly"
+          else
+            # Linux - use full static linking
+            # OpenSSL on 64-bit Linux installs to lib64, check both lib and lib64
+            export LDFLAGS="-L$HOME/curl-static/lib -L$HOME/openssl-static/lib -L$HOME/openssl-static/lib64 -static"
+            # Filter out rtmp, ssl, and crypto from LIBCURL
+            export LIBCURL="$(echo $LIBCURL | sed 's/-lrtmp//g' | sed 's/-lssl//g' | sed 's/-lcrypto//g' | sed 's/  */ /g' | sed 's/^ *//;s/ *$//')"
+            # Add OpenSSL static libraries explicitly - check lib64 first (64-bit Linux default), then lib
+            if [ -f "$HOME/openssl-static/lib64/libssl.a" ]; then
+              OPENSSL_LIB_DIR="$HOME/openssl-static/lib64"
+            else
+              OPENSSL_LIB_DIR="$HOME/openssl-static/lib"
+            fi
+            export LIBCURL="$LIBCURL ${OPENSSL_LIB_DIR}/libssl.a ${OPENSSL_LIB_DIR}/libcrypto.a"
+          fi
+          
+          ./configure $CONFIGURE_OPTS
+          
+          make -j
+          
+          # Verify dependencies
+          if [ "${{ matrix.os }}" = "macos-latest-large" ]; then
+            echo "macOS dependencies:"
+            otool -L minerd
+            # Fail if rtmp is still linked
+            if otool -L minerd | grep -q rtmp; then
+              echo "ERROR: Binary still links to librtmp!"
+              exit 1
+            fi
+            # Fail if OpenSSL is dynamically linked
+            if otool -L minerd | grep -q "libssl\|libcrypto"; then
+              echo "ERROR: Binary dynamically links to OpenSSL!"
+              exit 1
+            fi
+
+          elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            echo "Linux dependencies:"
+            # With -static flag, binary should be statically linked
+            # Check ldd output for verification
+            if ldd minerd 2>&1 | grep -qi "not a dynamic executable\|statically linked"; then
+              echo "SUCCESS: Binary is statically linked"
+            elif ! ldd minerd >/dev/null 2>&1; then
+              # ldd failed, which means static binary (expected behavior)
+              echo "SUCCESS: Binary is statically linked (ldd cannot read it, which is expected)"
+            else
+              # ldd succeeded, check for problematic libraries
+              LDD_OUTPUT=$(ldd minerd 2>&1)
+              echo "ldd output:"
+              echo "$LDD_OUTPUT"
+              # Only fail if we see actual .so library files for rtmp/ssl/crypto
+              if echo "$LDD_OUTPUT" | grep -qiE "(librtmp|libssl|libcrypto)\.so"; then
+                echo "ERROR: Binary dynamically links to rtmp/ssl/crypto!"
+                exit 1
+              else
+                echo "Note: Binary may have some system library dependencies, but not rtmp/ssl/crypto"
+              fi
+            fi
+            # Show file type
+            echo ""
+            file minerd || true
+          fi
+
+          # verify we can boot the binary
+          ./minerd --version
+
+      - name: "Set environment variables: version number and output filenames"
+        run: |
+          APP_DIRNAME="minerd-latest-${{ matrix.name }}"
+          APP_FILENAME="${APP_DIRNAME}"
+          echo "APP_FILENAME=$APP_FILENAME" >> "$GITHUB_ENV"
+          echo "APP_DIRNAME=$APP_DIRNAME" >> "$GITHUB_ENV"
+
+      - run: |
+          mkdir release
+          cp minerd release/${{ env.APP_FILENAME }}
+
+      - name: "Upload artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_DIRNAME }}
+          if-no-files-found: error
+          path: |
+            release/${{ env.APP_FILENAME }}
+
+      - name: Release
+        uses: softprops/action-gh-release@v2.0.2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            release/${{ env.APP_FILENAME }}
+          fail_on_unmatched_files: true
+
+  upload-releases-to-releases-drivechain-info:
+    name: Upload releases to releases.drivechain.info
+    runs-on: ubuntu-latest
+    needs: [build-release]
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create zip files for releases.drivechain.info
+        run: |
+          shopt -s extglob
+          zip -r minerd-latest-x86_64-apple-darwin.zip minerd-latest-x86_64-apple-darwin
+          zip -r minerd-latest-x86_64-unknown-linux-gnu.zip minerd-latest-x86_64-unknown-linux-gnu
+
+      - name: Upload release assets to releases.drivechain.info
+        uses: appleboy/scp-action@v1
+        with:
+          host: 45.33.96.47
+          username: root
+          password: ${{ secrets.RELEASES_SERVER_PW }}
+          port: 22
+          source: "minerd-latest-*.zip"
+          target: "/var/www/html/"
