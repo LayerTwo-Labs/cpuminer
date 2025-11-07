@@ -120,8 +120,24 @@ else
 	JANSSON_LIBS=-ljansson
 fi
 
-LIBCURL_CHECK_CONFIG([curl], 7.15.2, ,
-  [AC_MSG_ERROR([Missing required libcurl >= 7.15.2])])
+dnl Check for libcurl
+AC_PATH_PROG([CURL_CONFIG], [curl-config], [no])
+if test "$CURL_CONFIG" = "no"; then
+  AC_MSG_ERROR([curl-config not found. Please install libcurl development files.])
+fi
+
+LIBCURL_CPPFLAGS=`$CURL_CONFIG --cflags`
+if test -z "$LIBCURL"; then
+  LIBCURL=`$CURL_CONFIG --libs`
+fi
+
+dnl Check libcurl version
+LIBCURL_VERSION=`$CURL_CONFIG --version | sed 's/libcurl *//'`
+AC_MSG_CHECKING([for libcurl >= 7.15.2])
+AC_MSG_RESULT([$LIBCURL_VERSION])
+
+AC_SUBST(LIBCURL_CPPFLAGS)
+AC_SUBST(LIBCURL)
 
 AC_SUBST(JANSSON_LIBS)
 AC_SUBST(PTHREAD_FLAGS)
